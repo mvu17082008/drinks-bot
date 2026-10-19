@@ -6,7 +6,9 @@ from .db import TIERS, Drink, Review
 
 
 class DrinkCb(CallbackData, prefix="d"):
-    action: str  # open | back | rate | review | reviews | mytier | gtier
+    # open | back | rate | review | reviews | mytier | gtier
+    # | delreview | delreview_yes | deldrink | deldrink_yes
+    action: str
     drink_id: int
     page: int = 0
 
@@ -31,7 +33,7 @@ class PhotoCb(CallbackData, prefix="p"):
     user_id: int  # автор отзыва
 
 
-def drink_card_kb(drink_id: int, is_admin: bool) -> InlineKeyboardMarkup:
+def drink_card_kb(drink_id: int, is_admin: bool, has_review: bool = False) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="⭐ Оценить", callback_data=DrinkCb(action="rate", drink_id=drink_id))
     kb.button(text="✍️ Отзыв", callback_data=DrinkCb(action="review", drink_id=drink_id))
@@ -39,7 +41,20 @@ def drink_card_kb(drink_id: int, is_admin: bool) -> InlineKeyboardMarkup:
     kb.button(text="📊 В мой тир-лист", callback_data=DrinkCb(action="mytier", drink_id=drink_id))
     if is_admin:
         kb.button(text="🏆 В общий тир-лист", callback_data=DrinkCb(action="gtier", drink_id=drink_id))
-    kb.adjust(3, 1, 1)
+    if has_review:
+        kb.button(text="🗑 Удалить мой отзыв", callback_data=DrinkCb(action="delreview", drink_id=drink_id))
+    if is_admin:
+        kb.button(text="❌ Удалить напиток", callback_data=DrinkCb(action="deldrink", drink_id=drink_id))
+    kb.adjust(3, 1, 1, 1, 1)
+    return kb.as_markup()
+
+
+def confirm_kb(drink_id: int, action: str) -> InlineKeyboardMarkup:
+    """Да/нет перед удалением: action — то, что выполнится по «Да»."""
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Да, удалить", callback_data=DrinkCb(action=action, drink_id=drink_id))
+    kb.button(text="« Нет", callback_data=DrinkCb(action="back", drink_id=drink_id))
+    kb.adjust(2)
     return kb.as_markup()
 
 

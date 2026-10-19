@@ -1,5 +1,6 @@
 """Прогон бота целиком через Dispatcher без обращения к Telegram."""
 
+import io
 import itertools
 from datetime import datetime
 
@@ -8,8 +9,16 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, SendPhoto, TelegramMethod
-from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageText,
+    GetFile,
+    SendMessage,
+    SendPhoto,
+    TelegramMethod,
+)
+from aiogram.types import CallbackQuery, Chat, File, Message, PhotoSize, Update, User
+from PIL import Image
 
 from bot.config import Config
 from bot.db import Database
@@ -38,13 +47,21 @@ class FakeSession(BaseSession):
                 chat=Chat(id=method.chat_id or 0, type="private"),
                 text=method.text,
             )
+        if isinstance(method, GetFile):
+            return File(file_id=method.file_id, file_unique_id="u", file_path=method.file_id)
         return True
 
     async def close(self):
         pass
 
-    async def stream_content(self, *args, **kwargs):  # pragma: no cover
-        raise NotImplementedError
+    async def stream_content(self, url, *args, **kwargs):
+        # Любой файл «скачивается» как маленькая картинка; "broken" — как мусор.
+        if url.endswith("broken"):
+            yield b"not an image"
+            return
+        buf = io.BytesIO()
+        Image.new("RGB", (40, 60), (200, 30, 30)).save(buf, format="JPEG")
+        yield buf.getvalue()
 
 
 # Роутеры aiogram можно подключить только к одному диспетчеру, поэтому он общий.
@@ -141,7 +158,8 @@ async def test_full_flow(env):
     await press(env, USER, f"d:mytier:{drink.id}:0")
     out = await press(env, USER, f"t:my:{drink.id}:A")
     assert "Ваш тир: A" in texts_of(out)
-    assert "<b>A</b>: Добрый Кола" in texts_of(await send(env, USER, "/mytier"))
+    out = await send(env, USER, "/mytier")
+    assert [c.caption for c in out if isinstance(c, SendPhoto)] == ["<b>Мой тир-лист</b>"]
 
     # общий тир-лист: пользователю нельзя, админу можно
     out = await press(env, USER, f"t:global:{drink.id}:S")
@@ -150,7 +168,8 @@ async def test_full_flow(env):
     out = await press(env, ADMIN, f"d:open:{drink.id}:0")
     assert f"d:gtier:{drink.id}:0" in kb_data(out)
     await press(env, ADMIN, f"t:global:{drink.id}:S")
-    assert "<b>S</b>: Добрый Кола" in texts_of(await send(env, USER, "/tier"))
+    out = await send(env, USER, "/tier")
+    assert [c.caption for c in out if isinstance(c, SendPhoto)] == ["<b>Общий тир-лист</b>"]
     # личный тир админа не задет
     assert "Пока пусто" in texts_of(await send(env, ADMIN, "/mytier"))
 
@@ -203,3 +222,79 @@ async def test_review_with_photo(env):
     await send(env, USER, "/skip")
     assert (await db.get_review(USER.id, drink_id)).photo_id is None
     assert f"p:{drink_id}:{USER.id}" not in kb_data(await press(env, ADMIN, f"d:reviews:{drink_id}:0"))
+
+
+async def test_delete_review_and_drink(env):
+    _, _, _, db = env
+    await db.upsert_user(ADMIN.id, ADMIN.username, ADMIN.first_name)
+    drink_id = await db.add_drink("Буратино", None, ADMIN.id)
+
+    # без отзыва кнопки удаления отзыва нет, у обычного пользователя нет и удаления напитка
+    out = await press(env, USER, f"d:open:{drink_id}:0")
+    assert f"d:delreview:{drink_id}:0" not in kb_data(out)
+    assert f"d:deldrink:{drink_id}:0" not in kb_data(out)
+
+    await press(env, USER, f"s:{drink_id}:3")
+    await press(env, USER, f"d:review:{drink_id}:0")
+    await send(env, USER, "Слишком сладко")
+    out = await send(env, USER, photo="pic")
+    assert f"d:delreview:{drink_id}:0" in kb_data(out)
+
+    # удаление отзыва — через подтверждение, оценка остаётся
+    out = await press(env, USER, f"d:delreview:{drink_id}:0")
+    assert "Удалить ваш отзыв" in texts_of(out)
+    assert f"d:delreview_yes:{drink_id}:0" in kb_data(out)
+    out = await press(env, USER, f"d:delreview_yes:{drink_id}:0")
+    assert "Ваша оценка: 3" in texts_of(out)
+    assert "Слишком сладко" not in texts_of(out)
+    assert await db.get_review(USER.id, drink_id) is None
+    assert await db.count_reviews(drink_id) == 0
+
+    # пользователь не может удалить напиток даже подделав кнопку
+    out = await press(env, USER, f"d:deldrink_yes:{drink_id}:0")
+    assert any(isinstance(c, AnswerCallbackQuery) and c.show_alert for c in out)
+    assert await db.get_drink(drink_id) is not None
+
+    # админ удаляет напиток из карточки
+    out = await press(env, ADMIN, f"d:open:{drink_id}:0")
+    assert f"d:deldrink:{drink_id}:0" in kb_data(out)
+    assert "насовсем" in texts_of(await press(env, ADMIN, f"d:deldrink:{drink_id}:0"))
+    assert "удалён" in texts_of(await press(env, ADMIN, f"d:deldrink_yes:{drink_id}:0"))
+    assert await db.get_drink(drink_id) is None
+
+
+async def test_delete_review_keeps_nothing_without_score(env):
+    _, _, _, db = env
+    drink_id = await db.add_drink("Квас", None, None)
+    await db.upsert_user(USER.id, None, USER.first_name)
+    await db.set_review(USER.id, drink_id, "норм")
+    assert await db.delete_review(USER.id, drink_id)
+    assert await db.get_user_rating(USER.id, drink_id) == (None, None)
+    assert not await db.delete_review(USER.id, drink_id)
+
+
+async def test_tier_image_with_photos(env):
+    bot, _, session, db = env
+    await db.upsert_user(ADMIN.id, ADMIN.username, ADMIN.first_name)
+    await db.upsert_user(USER.id, None, USER.first_name)
+    cola = await db.add_drink("Кола", None, USER.id)
+    tea = await db.add_drink("Чай", None, USER.id)
+    await db.set_score(USER.id, cola, 8)
+    await db.set_review(USER.id, cola, "ок", "cola_pic")
+    await db.set_review(ADMIN.id, tea, "ок", "broken")
+    await db.set_personal_tier(USER.id, cola, "S")
+    await db.set_personal_tier(USER.id, tea, "F")
+
+    entries = {e.name: e for e in await db.personal_tier_entries(USER.id)}
+    assert (entries["Кола"].tier, entries["Кола"].score, entries["Кола"].photo_id) == ("S", 8, "cola_pic")
+    # своего фото нет — берём чужое
+    assert (entries["Чай"].score, entries["Чай"].photo_id) == (None, "broken")
+
+    out = await send(env, USER, "/mytier")
+    downloads = sorted(c.file_id for c in out if isinstance(c, GetFile))
+    assert downloads == ["broken", "cola_pic"]
+    photo = next(c for c in out if isinstance(c, SendPhoto))
+    image = Image.open(io.BytesIO(photo.photo.data))
+    assert image.format == "PNG" and image.width > 500
+
+    assert "Пока пусто" in texts_of(await send(env, USER, "/tier"))

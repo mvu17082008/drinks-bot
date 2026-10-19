@@ -13,6 +13,7 @@ from ..keyboards import (
     ListCb,
     PhotoCb,
     ScoreCb,
+    confirm_kb,
     drink_card_kb,
     drinks_list_kb,
     reviews_kb,
@@ -51,7 +52,7 @@ async def render_card(db: Database, drink_id: int, user_id: int, is_admin: bool)
         global_tier=await db.get_global_tier(drink_id),
         my_photo=bool(review and review.photo_id),
     )
-    return text, drink_card_kb(drink_id, is_admin)
+    return text, drink_card_kb(drink_id, is_admin, has_review=review is not None)
 
 
 async def show_card(message: Message, db: Database, drink_id: int, user_id: int, is_admin: bool) -> None:
@@ -305,3 +306,61 @@ async def cb_review_photo(call: CallbackQuery, callback_data: PhotoCb, db: Datab
         return
     await call.message.answer_photo(review.photo_id, caption=texts.review_caption(drink, review))
     await call.answer()
+
+
+# --- удаление ---
+
+
+@router.callback_query(DrinkCb.filter(F.action == "delreview"))
+async def cb_delreview(call: CallbackQuery, callback_data: DrinkCb, db: Database) -> None:
+    drink = await db.get_drink(callback_data.drink_id)
+    if drink is None or await db.get_review(call.from_user.id, callback_data.drink_id) is None:
+        await call.answer("Отзыв не найден.", show_alert=True)
+        return
+    await call.message.edit_text(
+        f"🗑 Удалить ваш отзыв о <b>{escape(drink.name)}</b> вместе с фото? Оценка останется.",
+        reply_markup=confirm_kb(drink.id, "delreview_yes"),
+    )
+    await call.answer()
+
+
+@router.callback_query(DrinkCb.filter(F.action == "delreview_yes"))
+async def cb_delreview_yes(call: CallbackQuery, callback_data: DrinkCb, db: Database, is_admin: bool) -> None:
+    deleted = await db.delete_review(call.from_user.id, callback_data.drink_id)
+    text, kb = await render_card(db, callback_data.drink_id, call.from_user.id, is_admin)
+    if text is None:
+        await call.answer("Напиток не найден — возможно, его удалили.", show_alert=True)
+        return
+    await call.message.edit_text(text, reply_markup=kb)
+    await call.answer("Отзыв удалён" if deleted else "Отзыв уже был удалён")
+
+
+@router.callback_query(DrinkCb.filter(F.action == "deldrink"))
+async def cb_deldrink(call: CallbackQuery, callback_data: DrinkCb, db: Database, is_admin: bool) -> None:
+    if not is_admin:
+        await call.answer("Удалять напитки могут только админы.", show_alert=True)
+        return
+    drink = await db.get_drink(callback_data.drink_id)
+    if drink is None:
+        await call.answer("Напиток не найден.", show_alert=True)
+        return
+    await call.message.edit_text(
+        f"❌ Удалить напиток <b>{escape(drink.name)}</b> насовсем? "
+        "Пропадут все его оценки, отзывы и места в тир-листах.",
+        reply_markup=confirm_kb(drink.id, "deldrink_yes"),
+    )
+    await call.answer()
+
+
+@router.callback_query(DrinkCb.filter(F.action == "deldrink_yes"))
+async def cb_deldrink_yes(call: CallbackQuery, callback_data: DrinkCb, db: Database, is_admin: bool) -> None:
+    if not is_admin:
+        await call.answer("Удалять напитки могут только админы.", show_alert=True)
+        return
+    drink = await db.get_drink(callback_data.drink_id)
+    if drink is None:
+        await call.answer("Напиток уже удалён.", show_alert=True)
+        return
+    await db.delete_drink(drink.id)
+    await call.message.edit_text(f"🗑 Напиток «{escape(drink.name)}» удалён вместе с оценками и отзывами.")
+    await call.answer("Удалено")
