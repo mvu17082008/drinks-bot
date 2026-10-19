@@ -66,17 +66,22 @@ def _contrast(color: tuple[int, int, int]) -> tuple[int, int, int]:
     return TEXT if 0.299 * r + 0.587 * g + 0.114 * b > 140 else (255, 255, 255)
 
 
-def _thumb(data: bytes | None) -> Image.Image:
+def _placeholder(name: str) -> Image.Image:
+    """Что рисовать вместо фото, если его нет."""
+    im = Image.new("RGB", (PHOTO, PHOTO), NO_PHOTO_BG)
+    ImageDraw.Draw(im).text((PHOTO / 2, PHOTO / 2), "нет фото", font=_font(18, True),
+                            fill=NO_PHOTO_FG, anchor="mm")
+    return im
+
+
+def _thumb(data: bytes | None, name: str) -> Image.Image:
     if data:
         try:
             with Image.open(io.BytesIO(data)) as src:
                 return ImageOps.fit(src.convert("RGB"), (PHOTO, PHOTO))
         except Exception:  # битая картинка — рисуем как без фото
             pass
-    im = Image.new("RGB", (PHOTO, PHOTO), NO_PHOTO_BG)
-    ImageDraw.Draw(im).text((PHOTO / 2, PHOTO / 2), "нет фото", font=_font(18, True),
-                            fill=NO_PHOTO_FG, anchor="mm")
-    return im
+    return _placeholder(name)
 
 
 def _rounded_mask() -> Image.Image:
@@ -88,7 +93,7 @@ def _rounded_mask() -> Image.Image:
 def _draw_item(im: Image.Image, draw: ImageDraw.ImageDraw, item: Item, x: int, y: int) -> None:
     """Одна ячейка: фото со скруглёнными углами, под ним название и оценка."""
     name_font, score_font = _font(15, True), _font(14)
-    im.paste(_thumb(item.photo), (x + PAD, y + PAD), _rounded_mask())
+    im.paste(_thumb(item.photo, item.name), (x + PAD, y + PAD), _rounded_mask())
     draw.text((x + CELL / 2, y + PAD + PHOTO + 14), _fit(draw, item.name, name_font, CELL - 8),
               font=name_font, fill=TEXT, anchor="mm")
     if item.score is not None:
