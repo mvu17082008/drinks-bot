@@ -27,7 +27,8 @@ GRID_STRONG = (210, 210, 215)
 TEXT = (30, 30, 30)
 TEXT_MUTED = (120, 120, 120)
 NO_PHOTO_BG = (235, 235, 238)
-NO_PHOTO_FG = (170, 170, 170)
+NO_PHOTO_FG = (195, 195, 200)
+NO_PHOTO_CAP = (170, 170, 175)
 
 COLUMNS = 5  # напитков в одной строке таблицы
 PHOTO = 130  # сторона фото
@@ -66,22 +67,27 @@ def _contrast(color: tuple[int, int, int]) -> tuple[int, int, int]:
     return TEXT if 0.299 * r + 0.587 * g + 0.114 * b > 140 else (255, 255, 255)
 
 
-def _placeholder(name: str) -> Image.Image:
-    """Что рисовать вместо фото, если его нет."""
+def _placeholder() -> Image.Image:
+    """Вместо фото — серая бутылка со знаком вопроса."""
     im = Image.new("RGB", (PHOTO, PHOTO), NO_PHOTO_BG)
-    ImageDraw.Draw(im).text((PHOTO / 2, PHOTO / 2), "нет фото", font=_font(18, True),
-                            fill=NO_PHOTO_FG, anchor="mm")
+    draw = ImageDraw.Draw(im)
+    cx, w = PHOTO / 2, PHOTO * 0.26
+    draw.rounded_rectangle([cx - w / 2, PHOTO * 0.34, cx + w / 2, PHOTO * 0.86],
+                           radius=int(w / 3), fill=NO_PHOTO_FG)
+    draw.rectangle([cx - w / 5, PHOTO * 0.16, cx + w / 5, PHOTO * 0.36], fill=NO_PHOTO_FG)
+    draw.rectangle([cx - w / 4.2, PHOTO * 0.12, cx + w / 4.2, PHOTO * 0.18], fill=NO_PHOTO_CAP)
+    draw.text((cx, PHOTO * 0.6), "?", font=_font(30, True), fill=NO_PHOTO_BG, anchor="mm")
     return im
 
 
-def _thumb(data: bytes | None, name: str) -> Image.Image:
+def _thumb(data: bytes | None) -> Image.Image:
     if data:
         try:
             with Image.open(io.BytesIO(data)) as src:
                 return ImageOps.fit(src.convert("RGB"), (PHOTO, PHOTO))
         except Exception:  # битая картинка — рисуем как без фото
             pass
-    return _placeholder(name)
+    return _placeholder()
 
 
 def _rounded_mask() -> Image.Image:
@@ -93,7 +99,7 @@ def _rounded_mask() -> Image.Image:
 def _draw_item(im: Image.Image, draw: ImageDraw.ImageDraw, item: Item, x: int, y: int) -> None:
     """Одна ячейка: фото со скруглёнными углами, под ним название и оценка."""
     name_font, score_font = _font(15, True), _font(14)
-    im.paste(_thumb(item.photo, item.name), (x + PAD, y + PAD), _rounded_mask())
+    im.paste(_thumb(item.photo), (x + PAD, y + PAD), _rounded_mask())
     draw.text((x + CELL / 2, y + PAD + PHOTO + 14), _fit(draw, item.name, name_font, CELL - 8),
               font=name_font, fill=TEXT, anchor="mm")
     if item.score is not None:
