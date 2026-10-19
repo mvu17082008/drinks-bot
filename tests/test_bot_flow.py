@@ -8,8 +8,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, TelegramMethod
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, SendPhoto, TelegramMethod
+from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
 
 from bot.config import Config
 from bot.db import Database
@@ -65,11 +65,15 @@ async def env(tmp_path):
     await db.close()
 
 
-async def send(env, user: User, text: str) -> list:
+async def send(env, user: User, text: str | None = None, photo: str | None = None) -> list:
     bot, dp, session, _ = env
     session.calls.clear()
+    sizes = None
+    if photo:
+        sizes = [PhotoSize(file_id=photo + "_small", file_unique_id="s", width=90, height=90),
+                 PhotoSize(file_id=photo, file_unique_id="b", width=800, height=800)]
     msg = Message(message_id=next(_ids), date=datetime.now(),
-                  chat=Chat(id=user.id, type="private"), from_user=user, text=text)
+                  chat=Chat(id=user.id, type="private"), from_user=user, text=text, photo=sizes)
     await dp.feed_update(bot, Update(update_id=next(_ids), message=msg))
     return list(session.calls)
 
@@ -127,6 +131,8 @@ async def test_full_flow(env):
     # отзыв
     await press(env, USER, f"d:review:{drink.id}:0")
     out = await send(env, USER, "Вкусно, но <сладко>")
+    assert "Пришлите" in texts_of(out)
+    out = await send(env, USER, "/skip")
     assert "Отзыв сохранён" in texts_of(out)
     assert "&lt;сладко&gt;" in texts_of(out)
     assert "Вкусно" in texts_of(await press(env, USER, f"d:reviews:{drink.id}:0"))
@@ -163,3 +169,37 @@ async def test_cancel(env):
     await send(env, USER, "/add")
     assert "Отменено" in texts_of(await send(env, USER, "/cancel"))
     assert "Отменять нечего" in texts_of(await send(env, USER, "/cancel"))
+
+
+async def test_review_with_photo(env):
+    _, _, _, db = env
+    await db.upsert_user(ADMIN.id, ADMIN.username, ADMIN.first_name)
+    drink_id = await db.add_drink("Тархун", None, ADMIN.id)
+
+    await press(env, USER, f"d:review:{drink_id}:0")
+    # фото без текста на первом шаге не принимаем
+    assert "Сначала напишите" in texts_of(await send(env, USER, photo="early"))
+    assert "фото напитка" in texts_of(await send(env, USER, "Освежает"))
+    # вместо фото прислали текст — напоминаем
+    assert "/skip" in texts_of(await send(env, USER, "что-то не то"))
+    out = await send(env, USER, photo="tarhun_photo")
+    assert "Отзыв с фото сохранён" in texts_of(out)
+    assert "приложено фото" in texts_of(out)
+    review = await db.get_review(USER.id, drink_id)
+    assert (review.text, review.photo_id) == ("Освежает", "tarhun_photo")
+
+    # в списке отзывов есть кнопка с фото, по ней бот присылает снимок с подписью
+    out = await press(env, ADMIN, f"d:reviews:{drink_id}:0")
+    assert "📷" in texts_of(out)
+    assert f"p:{drink_id}:{USER.id}" in kb_data(out)
+    out = await press(env, ADMIN, f"p:{drink_id}:{USER.id}")
+    photos = [c for c in out if isinstance(c, SendPhoto)]
+    assert len(photos) == 1 and photos[0].photo == "tarhun_photo"
+    assert "Освежает" in photos[0].caption
+
+    # новый отзыв без фото убирает старое фото
+    await press(env, USER, f"d:review:{drink_id}:0")
+    await send(env, USER, "Передумал")
+    await send(env, USER, "/skip")
+    assert (await db.get_review(USER.id, drink_id)).photo_id is None
+    assert f"p:{drink_id}:{USER.id}" not in kb_data(await press(env, ADMIN, f"d:reviews:{drink_id}:0"))

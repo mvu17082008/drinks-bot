@@ -1,3 +1,4 @@
+import aiosqlite
 import pytest
 
 from bot.db import Database
@@ -79,3 +80,45 @@ async def test_top_drinks_order(db):
     await db.set_score(1, a, 6)
     await db.set_score(1, b, 9)
     assert [d.name for d in await db.top_drinks()] == ["B", "A"]
+
+
+async def test_review_photo(db):
+    drink_id = await db.add_drink("Лимонад", None, 1)
+    await db.set_review(1, drink_id, "Кисло", "file123")
+    review = await db.get_review(1, drink_id)
+    assert (review.text, review.photo_id, review.user_id) == ("Кисло", "file123", 1)
+    assert (await db.get_reviews(drink_id, 0, 10))[0].photo_id == "file123"
+    assert await db.get_review(2, drink_id) is None
+
+
+async def test_old_database_gets_photo_column(tmp_path):
+    path = str(tmp_path / "old.db")
+    # база в формате первой версии бота, без колонки photo_id
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript("""
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, full_name TEXT NOT NULL,
+                                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE drinks (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                                 name_key TEXT NOT NULL UNIQUE, category TEXT, created_by INTEGER,
+                                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE ratings (user_id INTEGER NOT NULL, drink_id INTEGER NOT NULL,
+                                  score INTEGER, review TEXT,
+                                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                  PRIMARY KEY (user_id, drink_id));
+            INSERT INTO users (id, full_name) VALUES (1, 'Alice');
+            INSERT INTO drinks (name, name_key) VALUES ('Квас', 'квас');
+            INSERT INTO ratings (user_id, drink_id, score, review) VALUES (1, 1, 8, 'Старый отзыв');
+        """)
+        await conn.commit()
+    database = Database(path)
+    await database.connect()
+    try:
+        review = await database.get_review(1, 1)
+        assert (review.text, review.photo_id) == ("Старый отзыв", None)
+        await database.set_review(1, 1, "Новый", "pic")
+        assert (await database.get_review(1, 1)).photo_id == "pic"
+    finally:
+        await database.close()
+    # повторное подключение не ломается на уже добавленной колонке
+    await database.connect()
+    await database.close()

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS ratings (
     drink_id   INTEGER NOT NULL REFERENCES drinks(id) ON DELETE CASCADE,
     score      INTEGER CHECK (score BETWEEN 1 AND 10),
     review     TEXT,
+    photo_id   TEXT,  -- file_id фото из Telegram, необязательно
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, drink_id)
 );
@@ -67,6 +68,8 @@ class Review:
     author: str
     score: int | None
     text: str
+    photo_id: str | None = None
+    user_id: int | None = None
 
 
 _DRINK_SELECT = """
@@ -91,7 +94,15 @@ class Database:
         self._conn = await aiosqlite.connect(self.path)
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Докидывает новые колонки в базы, созданные старыми версиями бота."""
+        cur = await self._conn.execute("PRAGMA table_info(ratings)")
+        columns = {row[1] for row in await cur.fetchall()}
+        if "photo_id" not in columns:
+            await self._conn.execute("ALTER TABLE ratings ADD COLUMN photo_id TEXT")
 
     async def close(self) -> None:
         if self._conn:
@@ -196,14 +207,17 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_review(self, user_id: int, drink_id: int, text: str) -> None:
+    async def set_review(self, user_id: int, drink_id: int, text: str,
+                         photo_id: str | None = None) -> None:
+        """Новый отзыв заменяет старый вместе с фото."""
         await self.conn.execute(
             """
-            INSERT INTO ratings (user_id, drink_id, review) VALUES (?, ?, ?)
+            INSERT INTO ratings (user_id, drink_id, review, photo_id) VALUES (?, ?, ?, ?)
             ON CONFLICT(user_id, drink_id) DO UPDATE
-                SET review = excluded.review, updated_at = CURRENT_TIMESTAMP
+                SET review = excluded.review, photo_id = excluded.photo_id,
+                    updated_at = CURRENT_TIMESTAMP
             """,
-            (user_id, drink_id, text),
+            (user_id, drink_id, text, photo_id),
         )
         await self.conn.commit()
 
@@ -215,6 +229,19 @@ class Database:
         row = await cur.fetchone()
         return (row[0], row[1]) if row else (None, None)
 
+    async def get_review(self, user_id: int, drink_id: int) -> Review | None:
+        cur = await self.conn.execute(
+            """
+            SELECT COALESCE('@' || u.username, u.full_name), r.score, r.review,
+                   r.photo_id, r.user_id
+            FROM ratings r JOIN users u ON u.id = r.user_id
+            WHERE r.user_id = ? AND r.drink_id = ? AND r.review IS NOT NULL
+            """,
+            (user_id, drink_id),
+        )
+        row = await cur.fetchone()
+        return Review(*row) if row else None
+
     async def count_reviews(self, drink_id: int) -> int:
         cur = await self.conn.execute(
             "SELECT COUNT(*) FROM ratings WHERE drink_id = ? AND review IS NOT NULL",
@@ -225,7 +252,8 @@ class Database:
     async def get_reviews(self, drink_id: int, offset: int, limit: int) -> list[Review]:
         cur = await self.conn.execute(
             """
-            SELECT COALESCE('@' || u.username, u.full_name), r.score, r.review
+            SELECT COALESCE('@' || u.username, u.full_name), r.score, r.review,
+                   r.photo_id, r.user_id
             FROM ratings r JOIN users u ON u.id = r.user_id
             WHERE r.drink_id = ? AND r.review IS NOT NULL
             ORDER BY r.updated_at DESC

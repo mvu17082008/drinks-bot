@@ -46,6 +46,7 @@ def drink_card(
     my_review: str | None,
     my_tier: str | None,
     global_tier: str | None,
+    my_photo: bool = False,
 ) -> str:
     lines = [f"🥤 <b>{escape(drink.name)}</b>  <code>#{drink.id}</code>"]
     if drink.category:
@@ -57,6 +58,8 @@ def drink_card(
     lines.append(f"Ваш тир: {my_tier or '—'}")
     if my_review:
         lines.append(f"Ваш отзыв: <i>{escape(my_review)}</i>")
+        if my_photo:
+            lines.append("📷 К отзыву приложено фото — смотрите в «💬 Отзывы».")
     return "\n".join(lines)
 
 
@@ -77,8 +80,17 @@ def reviews(drink: Drink, items: list[Review], page: int, total: int) -> str:
     parts = [head, ""]
     for r in items:
         score = f" — {r.score}/10" if r.score is not None else ""
-        parts.append(f"<b>{escape(r.author)}</b>{score}\n{escape(r.text)}\n")
+        photo = " 📷" if r.photo_id else ""
+        parts.append(f"<b>{escape(r.author)}</b>{score}{photo}\n{escape(r.text)}\n")
     return "\n".join(parts)
+
+
+def review_caption(drink: Drink, review: Review) -> str:
+    score = f" — {review.score}/10" if review.score is not None else ""
+    return truncate(
+        f"🥤 <b>{escape(drink.name)}</b>\n<b>{escape(review.author)}</b>{score}\n{escape(review.text)}",
+        1024,  # лимит подписи к фото в Telegram
+    )
 
 
 def truncate(text: str, limit: int = 4000) -> str:

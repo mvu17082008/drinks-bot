@@ -2,7 +2,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from .db import TIERS, Drink
+from .db import TIERS, Drink, Review
 
 
 class DrinkCb(CallbackData, prefix="d"):
@@ -24,6 +24,11 @@ class TierCb(CallbackData, prefix="t"):
 
 class ListCb(CallbackData, prefix="l"):
     page: int
+
+
+class PhotoCb(CallbackData, prefix="p"):
+    drink_id: int
+    user_id: int  # автор отзыва
 
 
 def drink_card_kb(drink_id: int, is_admin: bool) -> InlineKeyboardMarkup:
@@ -57,8 +62,15 @@ def tier_kb(drink_id: int, scope: str) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def reviews_kb(drink_id: int, page: int, has_next: bool) -> InlineKeyboardMarkup:
+def reviews_kb(drink_id: int, page: int, has_next: bool,
+               items: list[Review] = ()) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    photos = 0
+    for r in items:
+        if r.photo_id:
+            kb.button(text=f"📷 Фото от {r.author}",
+                      callback_data=PhotoCb(drink_id=drink_id, user_id=r.user_id))
+            photos += 1
     nav = 0
     if page > 0:
         kb.button(text="◀️", callback_data=DrinkCb(action="reviews", drink_id=drink_id, page=page - 1))
@@ -67,7 +79,7 @@ def reviews_kb(drink_id: int, page: int, has_next: bool) -> InlineKeyboardMarkup
         kb.button(text="▶️", callback_data=DrinkCb(action="reviews", drink_id=drink_id, page=page + 1))
         nav += 1
     kb.button(text="« К напитку", callback_data=DrinkCb(action="back", drink_id=drink_id))
-    kb.adjust(*([nav] if nav else []), 1)
+    kb.adjust(*([1] * photos), *([nav] if nav else []), 1)
     return kb.as_markup()
 
 

@@ -11,6 +11,7 @@ from ..db import Database
 from ..keyboards import (
     DrinkCb,
     ListCb,
+    PhotoCb,
     ScoreCb,
     drink_card_kb,
     drinks_list_kb,
@@ -33,19 +34,22 @@ class AddDrink(StatesGroup):
 
 class WriteReview(StatesGroup):
     text = State()
+    photo = State()
 
 
 async def render_card(db: Database, drink_id: int, user_id: int, is_admin: bool):
     drink = await db.get_drink(drink_id)
     if drink is None:
         return None, None
-    score, review = await db.get_user_rating(user_id, drink_id)
+    score, _ = await db.get_user_rating(user_id, drink_id)
+    review = await db.get_review(user_id, drink_id)
     text = texts.drink_card(
         drink,
         my_score=score,
-        my_review=review,
+        my_review=review.text if review else None,
         my_tier=await db.get_personal_tier(user_id, drink_id),
         global_tier=await db.get_global_tier(drink_id),
+        my_photo=bool(review and review.photo_id),
     )
     return text, drink_card_kb(drink_id, is_admin)
 
@@ -229,18 +233,49 @@ async def cb_review(call: CallbackQuery, callback_data: DrinkCb, db: Database, s
 
 
 @router.message(WriteReview.text, F.text, ~F.text.startswith("/"))
-async def review_text(message: Message, state: FSMContext, db: Database, is_admin: bool) -> None:
-    data = await state.get_data()
+async def review_text(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     if len(text) > MAX_REVIEW_LEN:
         await message.answer(f"Слишком длинно: {len(text)} символов из {MAX_REVIEW_LEN}. Сократите, пожалуйста.")
         return
+    await state.update_data(text=text)
+    await state.set_state(WriteReview.photo)
+    await message.answer(
+        "📷 Хотите прикрепить фото напитка? Пришлите его сюда "
+        "или отправьте /skip, чтобы сохранить отзыв без фото."
+    )
+
+
+@router.message(WriteReview.text, F.photo)
+async def review_photo_first(message: Message) -> None:
+    await message.answer("Сначала напишите отзыв текстом, фото можно будет прикрепить следующим сообщением.")
+
+
+@router.message(WriteReview.photo, F.photo)
+async def review_photo(message: Message, state: FSMContext, db: Database, is_admin: bool) -> None:
+    # Telegram присылает несколько размеров, последний — самый крупный.
+    await _save_review(message, state, db, is_admin, message.photo[-1].file_id)
+
+
+@router.message(WriteReview.photo, Command("skip"))
+async def review_skip_photo(message: Message, state: FSMContext, db: Database, is_admin: bool) -> None:
+    await _save_review(message, state, db, is_admin, None)
+
+
+@router.message(WriteReview.photo, ~F.text.startswith("/"))
+async def review_photo_wrong(message: Message) -> None:
+    await message.answer("Пришлите фото (как картинку, не файлом) или /skip, чтобы обойтись без него.")
+
+
+async def _save_review(message: Message, state: FSMContext, db: Database, is_admin: bool,
+                       photo_id: str | None) -> None:
+    data = await state.get_data()
     await state.clear()
     if await db.get_drink(data["drink_id"]) is None:
         await message.answer("Напиток не найден — возможно, его удалили.")
         return
-    await db.set_review(message.from_user.id, data["drink_id"], text)
-    await message.answer("✅ Отзыв сохранён!")
+    await db.set_review(message.from_user.id, data["drink_id"], data["text"], photo_id)
+    await message.answer("✅ Отзыв с фото сохранён!" if photo_id else "✅ Отзыв сохранён!")
     await show_card(message, db, data["drink_id"], message.from_user.id, is_admin)
 
 
@@ -256,6 +291,17 @@ async def cb_reviews(call: CallbackQuery, callback_data: DrinkCb, db: Database) 
     has_next = (page + 1) * REVIEWS_PAGE_SIZE < total
     await call.message.edit_text(
         texts.truncate(texts.reviews(drink, items, page, total)),
-        reply_markup=reviews_kb(drink.id, page, has_next),
+        reply_markup=reviews_kb(drink.id, page, has_next, items),
     )
+    await call.answer()
+
+
+@router.callback_query(PhotoCb.filter())
+async def cb_review_photo(call: CallbackQuery, callback_data: PhotoCb, db: Database) -> None:
+    drink = await db.get_drink(callback_data.drink_id)
+    review = await db.get_review(callback_data.user_id, callback_data.drink_id)
+    if drink is None or review is None or not review.photo_id:
+        await call.answer("Фото не найдено — возможно, отзыв изменили.", show_alert=True)
+        return
+    await call.message.answer_photo(review.photo_id, caption=texts.review_caption(drink, review))
     await call.answer()
