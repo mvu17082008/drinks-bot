@@ -72,6 +72,22 @@ class Review:
     user_id: int | None = None
 
 
+@dataclass
+class TierEntry:
+    tier: str
+    name: str
+    score: float | None
+    photo_id: str | None
+
+
+# Фото напитка для картинки: свежее фото из отзывов (своё — в приоритете для личного списка).
+_LATEST_PHOTO = """
+(SELECT p.photo_id FROM ratings p
+ WHERE p.drink_id = d.id AND p.photo_id IS NOT NULL
+ ORDER BY p.user_id = ? DESC, p.updated_at DESC LIMIT 1)
+"""
+
+
 _DRINK_SELECT = """
 SELECT d.id, d.name, d.category,
        AVG(r.score) AS avg_score,
@@ -221,6 +237,22 @@ class Database:
         )
         await self.conn.commit()
 
+    async def delete_review(self, user_id: int, drink_id: int) -> bool:
+        """Удаляет отзыв и фото; оценка остаётся, если она была."""
+        cur = await self.conn.execute(
+            """
+            UPDATE ratings SET review = NULL, photo_id = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ? AND drink_id = ? AND review IS NOT NULL
+            """,
+            (user_id, drink_id),
+        )
+        await self.conn.execute(
+            "DELETE FROM ratings WHERE user_id = ? AND drink_id = ? AND score IS NULL AND review IS NULL",
+            (user_id, drink_id),
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
     async def get_user_rating(self, user_id: int, drink_id: int) -> tuple[int | None, str | None]:
         cur = await self.conn.execute(
             "SELECT score, review FROM ratings WHERE user_id = ? AND drink_id = ?",
@@ -321,6 +353,32 @@ class Database:
             (user_id,),
         )
         return _group(await cur.fetchall())
+
+    async def personal_tier_entries(self, user_id: int) -> list[TierEntry]:
+        """Личный тир-лист для картинки: под фото — своя оценка."""
+        cur = await self.conn.execute(
+            f"""
+            SELECT t.tier, d.name, r.score, {_LATEST_PHOTO}
+            FROM personal_tiers t JOIN drinks d ON d.id = t.drink_id
+            LEFT JOIN ratings r ON r.drink_id = d.id AND r.user_id = t.user_id
+            WHERE t.user_id = ? ORDER BY d.name_key
+            """,
+            (user_id, user_id),
+        )
+        return [TierEntry(*r) for r in await cur.fetchall()]
+
+    async def global_tier_entries(self) -> list[TierEntry]:
+        """Общий тир-лист для картинки: под фото — средняя оценка."""
+        cur = await self.conn.execute(
+            f"""
+            SELECT t.tier, d.name, (SELECT AVG(score) FROM ratings WHERE drink_id = d.id),
+                   {_LATEST_PHOTO}
+            FROM global_tiers t JOIN drinks d ON d.id = t.drink_id
+            ORDER BY d.name_key
+            """,
+            (0,),
+        )
+        return [TierEntry(*r) for r in await cur.fetchall()]
 
     async def global_tier_list(self) -> dict[str, list[str]]:
         cur = await self.conn.execute(
